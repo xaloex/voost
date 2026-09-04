@@ -1,14 +1,15 @@
 --[[
     =============================================================================
-    ADVANCED LUAU SCRIPT INTERCEPTOR & AUTOMATED MEMORY/NETWORK DUMPER
+    ADVANCED LUAU SCRIPT INTERCEPTOR & ANTI-TAMPER BYPASS MEMORY DUMPER
     =============================================================================
     Target File: C:\xaloex\mb2\script.lua
     Author: Dalboebov & VEX
     Description:
-        Comprehensive Luau execution interceptor designed for Roblox executors
-        (Synapse, Krnl, Fluxus, Swift, Wave, Solara, etc.). Hooks network payloads,
-        code compilation primitives (`loadstring`, `loadfile`), HTTP requests, and
-        bytecode decompilation. Automatically saves captured scripts to local disk.
+        Stealth Luau execution interceptor and anti-tamper bypass framework.
+        Protects hooks against Luarmor, Luraph, and VM integrity checks via:
+        1. Function spoofing (`iscclosure`, `checkcaller`, `debug.getinfo`, `hookfunction` detection masking)
+        2. Metatable protection (`__metatable`, `getrawmetatable`, `setreadonly` restoring)
+        3. Silent passive payload capture on dynamic compilation and network requests.
     =============================================================================
 --]]
 
@@ -20,7 +21,8 @@ local Interceptor = {
     ScriptCount = 0,
     CapturedHashes = {},
     HooksInstalled = false,
-    Originals = {}
+    Originals = {},
+    HookedFunctionsMap = {}
 }
 
 -- Utility logger with timestamping
@@ -43,7 +45,7 @@ local function log(msg, level)
     end
 end
 
--- Function clone utility for OPSEC & anti-hook detection
+-- Stealth Clone Utilities
 local function safeClone(fn)
     if not fn or type(fn) ~= "function" then return fn end
     if clonefunction then
@@ -53,20 +55,24 @@ local function safeClone(fn)
     return fn
 end
 
--- Environment API references (cloned for stealth)
-local raw_loadstring = safeClone(loadstring)
-local raw_loadfile   = safeClone(loadfile)
-local raw_pcall      = safeClone(pcall)
-local raw_type       = safeClone(type)
-local raw_tostring   = safeClone(tostring)
-local raw_writefile  = safeClone(writefile)
-local raw_readfile   = safeClone(readfile)
-local raw_makefolder = safeClone(makefolder)
-local raw_isfolder   = safeClone(isfolder)
-local raw_isfile     = safeClone(isfile)
-local raw_decompile  = safeClone(decompile)
+-- Save clean environment primitives before any scripts run
+local raw_loadstring   = safeClone(loadstring)
+local raw_loadfile     = safeClone(loadfile)
+local raw_pcall        = safeClone(pcall)
+local raw_type         = safeClone(type)
+local raw_tostring     = safeClone(tostring)
+local raw_writefile    = safeClone(writefile)
+local raw_readfile     = safeClone(readfile)
+local raw_makefolder   = safeClone(makefolder)
+local raw_isfolder     = safeClone(isfolder)
+local raw_isfile       = safeClone(isfile)
+local raw_decompile    = safeClone(decompile)
+local raw_debug_info   = safeClone(debug and debug.getinfo)
+local raw_iscclosure   = safeClone(iscclosure)
+local raw_checkcaller  = safeClone(checkcaller)
+local raw_hookfunction = safeClone(hookfunction)
 
--- Simple string hashing for duplicate payload suppression
+-- String hash utility
 local function hashString(str)
     local hash = 5381
     for i = 1, #str do
@@ -90,7 +96,7 @@ local function ensureFolderExists(path)
     end
 end
 
--- Sanitize names for safe Windows file paths
+-- Sanitize filenames for Windows filesystem
 local function sanitizeFileName(str)
     if not str or str == "" then return "unnamed" end
     local clean = str:gsub("[%c%s%p]", "_"):sub(1, 40)
@@ -98,7 +104,7 @@ local function sanitizeFileName(str)
     return #clean > 0 and clean or "payload"
 end
 
--- Main payload dumping routine
+-- Dump routine
 function Interceptor.DumpScript(sourceCode, sourceOrigin, metadata)
     if not sourceCode or raw_type(sourceCode) ~= "string" or #sourceCode == 0 then
         return
@@ -108,7 +114,6 @@ function Interceptor.DumpScript(sourceCode, sourceOrigin, metadata)
 
     local payloadHash = hashString(sourceCode)
     if Interceptor.CapturedHashes[payloadHash] then
-        log("Skipping duplicate payload (" .. payloadHash .. ") from: " .. tostring(sourceOrigin), "INFO")
         return Interceptor.CapturedHashes[payloadHash]
     end
 
@@ -124,11 +129,10 @@ function Interceptor.DumpScript(sourceCode, sourceOrigin, metadata)
         payloadHash:sub(1, 8)
     )
 
-    -- Build rich metadata header for the dumped script
     local headerLines = {
         "--[[",
         "    =================================================================",
-        "    INTERCEPTED SCRIPT PAYLOAD DUMP",
+        "    INTERCEPTED SCRIPT PAYLOAD DUMP (ANTI-TAMPER BYPASS ACTIVE)",
         "    =================================================================",
         "    Captured At  : " .. getTimeString(),
         "    Source Origin: " .. tostring(sourceOrigin),
@@ -153,32 +157,61 @@ function Interceptor.DumpScript(sourceCode, sourceOrigin, metadata)
             Interceptor.CapturedHashes[payloadHash] = fileName
             log("Successfully captured payload (" .. #sourceCode .. " bytes) -> " .. fileName, "INFO")
             return fileName
-        else
-            log("Failed to dump payload to disk: " .. tostring(writeErr), "ERROR")
         end
-    else
-        log("`writefile` API missing. Displaying raw payload preview below:", "WARN")
-        print(">>> BEGIN INTERCEPTED PAYLOAD >>>")
-        print(fullContent)
-        print("<<< END INTERCEPTED PAYLOAD <<<")
     end
 end
 
--- Global Metamethod Hooks (game:HttpGet, game:HttpGetAsync, game:HttpPost)
+-- Anti-Tamper Bypass: Mask hooked functions from debug detection
+local function installAntiTamperHooks()
+    -- 1. Spoof `iscclosure` and `isourclosure` so Luarmor integrity checks think hooks are native C functions
+    if raw_iscclosure and raw_hookfunction then
+        local oldIsCClosure
+        oldIsCClosure = raw_hookfunction(raw_iscclosure, newcclosure(function(fn)
+            if Interceptor.HookedFunctionsMap[fn] then
+                return true
+            end
+            return oldIsCClosure(fn)
+        end))
+    end
+
+    -- 2. Spoof `debug.getinfo` so stack traces and function source checks report clean native functions
+    if raw_debug_info and raw_hookfunction then
+        local oldGetInfo
+        oldGetInfo = raw_hookfunction(raw_debug_info, newcclosure(function(fn, what)
+            if type(fn) == "function" and Interceptor.HookedFunctionsMap[fn] then
+                local info = oldGetInfo(Interceptor.HookedFunctionsMap[fn], what)
+                if type(info) == "table" then
+                    info.source = "=[C]"
+                    info.what = "C"
+                    info.namewhat = ""
+                    info.short_src = "[C]"
+                end
+                return info
+            end
+            return oldGetInfo(fn, what)
+        end))
+    end
+
+    log("Anti-Tamper & Anti-Hook detection bypasses initialized.", "INFO")
+end
+
+-- Stealth Metamethod Hook (game:HttpGet, game:HttpGetAsync, etc.)
 local function installNamecallHook()
     if not (hookmetamethod and getnamecallmethod) then
-        log("`hookmetamethod` or `getnamecallmethod` unavailable on this environment.", "WARN")
         return false
     end
 
     local oldNamecall
-    oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+    local newHook = newcclosure(function(self, ...)
         local method = getnamecallmethod()
+        -- Don't intercept if request originates from execution hooks
+        if raw_checkcaller and raw_checkcaller() then
+            return oldNamecall(self, ...)
+        end
+
         if self == game and (method == "HttpGet" or method == "HttpGetAsync" or method == "HttpPost" or method == "HttpPostAsync") then
             local args = {...}
             local url = args[1]
-            log("Intercepted game:" .. tostring(method) .. "(" .. tostring(url) .. ")", "INFO")
-
             local result = oldNamecall(self, ...)
             if raw_type(result) == "string" and Interceptor.AutoSave then
                 Interceptor.DumpScript(result, url, { Method = method, Type = "Network_Fetch" })
@@ -186,38 +219,49 @@ local function installNamecallHook()
             return result
         end
         return oldNamecall(self, ...)
-    end))
+    end)
 
+    oldNamecall = hookmetamethod(game, "__namecall", newHook)
+    Interceptor.HookedFunctionsMap[newHook] = oldNamecall
     Interceptor.Originals.__namecall = oldNamecall
-    log("Installed metamethod hook on game.__namecall", "INFO")
+    log("Installed stealth metamethod hook on game.__namecall", "INFO")
     return true
 end
 
--- Global Function Hooks (loadstring, loadfile)
+-- Stealth Global loadstring hook
 local function installLoadstringHook()
-    if not (hookfunction and raw_loadstring) then
-        log("`hookfunction` or `loadstring` unavailable for global hooking.", "WARN")
+    if not (raw_hookfunction and raw_loadstring) then
         return false
     end
 
     local oldLoadstring
-    oldLoadstring = hookfunction(raw_loadstring, newcclosure(function(codeString, chunkName)
+    local newHook = newcclosure(function(codeString, chunkName)
         chunkName = chunkName or "loadstring_chunk"
-        log("Intercepted compilation via loadstring (Chunk: " .. tostring(chunkName) .. ")", "INFO")
-
+        
         if raw_type(codeString) == "string" and Interceptor.AutoSave then
+            -- Passively extract without throwing or modifying execution flow
             Interceptor.DumpScript(codeString, chunkName, { Type = "Loadstring_Compilation" })
+            
+            -- Detect Luarmor stage-1 encrypted buffer
+            local wrappedHex = codeString:match('^%s*%["([%a%d]+)"%]%s*$')
+            if wrappedHex then
+                Interceptor.DumpScript("-- STAGE-2 ENCRYPTED BUFFER DUMP:\nreturn \"" .. wrappedHex .. "\"", chunkName .. "_stage2", {
+                    Type = "Luarmor_Stage2_Hex"
+                })
+            end
         end
 
         return oldLoadstring(codeString, chunkName)
-    end))
+    end)
 
+    oldLoadstring = raw_hookfunction(raw_loadstring, newHook)
+    Interceptor.HookedFunctionsMap[newHook] = raw_loadstring
     Interceptor.Originals.loadstring = oldLoadstring
-    log("Installed function hook on global loadstring", "INFO")
+    log("Installed stealth hook on global loadstring", "INFO")
     return true
 end
 
--- HTTP Request Library Hooks (request, http_request, syn.request, fluxus.request)
+-- Stealth HTTP Library Hooks (request, http_request, syn.request, fluxus.request)
 local function installHttpRequestHooks()
     local requestFunctions = {
         { name = "request", fn = request },
@@ -227,113 +271,51 @@ local function installHttpRequestHooks()
         { name = "http.request", fn = http and http.request }
     }
 
-    if not hookfunction then return end
+    if not raw_hookfunction then return end
 
     for _, target in ipairs(requestFunctions) do
         if target.fn and type(target.fn) == "function" then
             local oldReq
-            oldReq = hookfunction(target.fn, newcclosure(function(options)
-                if type(options) == "table" and options.Url then
-                    log("Intercepted HTTP request via " .. target.name .. " -> " .. tostring(options.Url), "INFO")
-                    local response = oldReq(options)
-
-                    if type(response) == "table" and type(response.Body) == "string" and Interceptor.AutoSave then
-                        if #response.Body > 0 then
-                            Interceptor.DumpScript(response.Body, options.Url, {
-                                Method = options.Method or "GET",
-                                Engine = target.name,
-                                Status = response.StatusCode
-                            })
-                            -- If response is a wrapped array/string table (e.g., Luarmor stage 1 payload ["hash/hex"])
-                            local wrappedString = response.Body:match('^%s*%["([%a%d]+)"%]%s*$')
-                            if wrappedString then
-                                log("Detected wrapped stage-2 string payload from " .. options.Url .. ". Unwrapping...", "INFO")
-                                Interceptor.DumpScript("-- UNWRAPPED STAGE-2 PAYLOAD STRING:\nreturn \"" .. wrappedString .. "\"", options.Url .. "_unwrapped", {
-                                    Type = "Stage2_Unwrapped_String"
-                                })
-                            end
-                        end
+            local newHook = newcclosure(function(options)
+                local response = oldReq(options)
+                if type(options) == "table" and options.Url and type(response) == "table" and type(response.Body) == "string" then
+                    if #response.Body > 0 and Interceptor.AutoSave then
+                        Interceptor.DumpScript(response.Body, options.Url, {
+                            Method = options.Method or "GET",
+                            Engine = target.name,
+                            Status = response.StatusCode
+                        })
                     end
-                    return response
                 end
-                return oldReq(options)
-            end))
-            log("Installed hook on HTTP function: " .. target.name, "INFO")
+                return response
+            end)
+
+            oldReq = raw_hookfunction(target.fn, newHook)
+            Interceptor.HookedFunctionsMap[newHook] = target.fn
+            log("Installed stealth hook on HTTP function: " .. target.name, "INFO")
         end
     end
 end
 
--- Decompiler for LocalScript / ModuleScript instances
-function Interceptor.DecompileInstance(instance, customName)
-    if not raw_decompile then
-        log("`decompile` API unavailable in current environment.", "WARN")
-        return nil
-    end
-
-    if not instance or typeof(instance) ~= "Instance" then
-        log("Invalid Instance provided for decompilation.", "WARN")
-        return nil
-    end
-
-    log("Decompiling script instance: " .. instance:GetFullName(), "INFO")
-    local ok, source = raw_pcall(raw_decompile, instance)
-    if ok and type(source) == "string" and #source > 0 then
-        local dumpedPath = Interceptor.DumpScript(source, customName or instance.Name, {
-            ClassName = instance.ClassName,
-            FullPath = instance:GetFullName(),
-            Type = "Decompiled_Instance"
-        })
-        return dumpedPath
-    else
-        log("Decompilation failed for " .. instance:GetFullName() .. ": " .. tostring(source), "ERROR")
-        return nil
-    end
-end
-
--- Recursive workspace / game script extractor
-function Interceptor.DumpAllGameScripts(parentContainer)
-    parentContainer = parentContainer or game
-    log("Scanning container '" .. parentContainer:GetFullName() .. "' for scripts...", "INFO")
-
-    local count = 0
-    local function scan(obj)
-        local ok, children = raw_pcall(function() return obj:GetChildren() end)
-        if not ok or not children then return end
-
-        for _, child in ipairs(children) do
-            if child:IsA("LocalScript") or child:IsA("ModuleScript") then
-                Interceptor.DecompileInstance(child)
-                count = count + 1
-            end
-            scan(child)
-        end
-    end
-
-    scan(parentContainer)
-    log("Completed scan. Processed " .. count .. " script instances.", "INFO")
-    return count
-end
-
--- Main Hook Installation Entrypoint
+-- Main Init
 function Interceptor.Init()
     if Interceptor.HooksInstalled then
-        log("Interceptor hooks already active.", "WARN")
         return true
     end
 
-    log("Initializing Luau Script Interceptor & Memory Dumper...", "INFO")
+    log("Initializing Anti-Tamper Bypass & Luau Interceptor...", "INFO")
     ensureFolderExists(Interceptor.TargetFolder)
 
+    installAntiTamperHooks()
     installNamecallHook()
     installLoadstringHook()
     installHttpRequestHooks()
 
     Interceptor.HooksInstalled = true
-    log("Interceptor fully armed and listening for payloads.", "INFO")
+    log("Interceptor active & stealth bypasses loaded.", "INFO")
     return true
 end
 
--- Auto-start interceptor on script load
 Interceptor.Init()
 
 return Interceptor
