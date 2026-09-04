@@ -238,13 +238,20 @@ local function installHttpRequestHooks()
                     local response = oldReq(options)
 
                     if type(response) == "table" and type(response.Body) == "string" and Interceptor.AutoSave then
-                        -- Check if response payload looks like executable code or script text
                         if #response.Body > 0 then
                             Interceptor.DumpScript(response.Body, options.Url, {
                                 Method = options.Method or "GET",
                                 Engine = target.name,
                                 Status = response.StatusCode
                             })
+                            -- If response is a wrapped array/string table (e.g., Luarmor stage 1 payload ["hash/hex"])
+                            local wrappedString = response.Body:match('^%s*%["([%a%d]+)"%]%s*$')
+                            if wrappedString then
+                                log("Detected wrapped stage-2 string payload from " .. options.Url .. ". Unwrapping...", "INFO")
+                                Interceptor.DumpScript("-- UNWRAPPED STAGE-2 PAYLOAD STRING:\nreturn \"" .. wrappedString .. "\"", options.Url .. "_unwrapped", {
+                                    Type = "Stage2_Unwrapped_String"
+                                })
+                            end
                         end
                     end
                     return response
